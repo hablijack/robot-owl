@@ -18,6 +18,7 @@ A robotic owl companion with expressive LCD eyes, face detection, IMU, GPS, and 
 | **GPS** | Adafruit PA1010D | I2C | SDA=1, SCL=2, addr 0x10 | Position/satellites |
 | **Servo Driver** | PCA9685 | I2C | SDA=1, SCL=2, addr 0x40 | 5-channel PWM for servos |
 | **Vibration** | SW420 | Digital GPIO | Pin 4 (input) | Wake-on-vibration trigger |
+| **Audio Amp** | MAX98357A (Adafruit) | I2S — **on the Raspberry Pi**, not the ESP32 | BCLK=GPIO18, LRCLK=GPIO19, DIN=GPIO21 (Pi 40-pin header) | Sound effects / voice |
 
 ### Servo Channels (PCA9685)
 | Channel | Function | Range |
@@ -34,6 +35,15 @@ All three I2C devices share the same bus: BNO055 @ 0x28, PA1010D @ 0x10, PCA9685
 ### Power
 - LCD backlights tied directly to 3.3V (always on)
 - Servos powered separately (not from ESP32 3.3V rail)
+- MAX98357A amp powered from the Pi 5V rail; speaker is 4Ω or 8Ω
+
+### Audio (RPi-side)
+Sound lives **entirely on the Raspberry Pi** — the MAX98357A amp is driven
+over the Pi's I2S bus, so the ESP32 has no audio pins. Enable I2S with
+`dtoverlay=hifiberry-i2s-lite` in `/boot/config.txt`. The brain synthesizes
+short effects (beep/chirp/happy/sad/alert) in-process (`brain/audio.py`) and
+plays them with `aplay`; if the amp/I2S is absent it just logs and no-ops.
+Full pin map + the SD-MODE-to-3.3V gotcha are in `WIRING.md`.
 
 ---
 
@@ -258,6 +268,42 @@ pio run --target monitor   # Serial monitor (115200 baud)
 ```
 
 **Build size:** RAM 11.2% (36,644 / 327,680 bytes), Flash 25.5% (851,585 / 3,342,336 bytes)
+
+---
+
+### Raspberry Pi Brain — one-command setup
+
+On a fresh Raspberry Pi OS install, the whole RPi side is set up with a single script:
+
+```bash
+cd rpi-brain
+sudo ./setup.sh
+```
+
+`setup.sh` (idempotent — safe to re-run) does, in order:
+
+1. **apt** — installs `python3-venv`, `python3-pip`, `alsa-utils` (for `aplay`), `rsync`.
+2. **I2S audio** — adds `dtoverlay=hifiberry-i2s-lite` to the right `config.txt`
+   (handles both `/boot` and Bookworm's `/boot/firmware`) so the MAX98357A amp works.
+3. **Install** — copies the brain to `/opt/robot-owl/rpi-brain`, builds a `.venv`,
+   installs `requirements.txt`.
+4. **User + permissions** — creates the `robotowl` system user in the `dial` group
+   and installs a udev rule so it can open the ESP32 USB CDC serial port.
+5. **systemd** — installs + enables `robot-owl-brain.service`.
+6. **Reboot** — reboots to apply the I2S overlay; the robot auto-starts on boot
+   (a one-shot hook guarantees it, then clears itself).
+
+After the reboot the owl is running. Then:
+
+```bash
+journalctl -u robot-owl-brain -f      # watch it
+systemctl status robot-owl-brain       # check state
+aplay -l                                # confirm the I2S amp is visible
+```
+
+> To use the web UI, set `web.enabled: true` in `/opt/robot-owl/rpi-brain/config.yaml`
+> and open `http://<pi-ip>:8080` (LAN only, no auth). If the serial port isn't
+> `/dev/ttyACM0`, edit `serial.port` in that file (`ls /dev/ttyACM*`).
 
 ---
 

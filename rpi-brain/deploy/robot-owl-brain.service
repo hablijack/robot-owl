@@ -1,0 +1,22 @@
+[Unit]
+Description=Robot Owl Brain (RPi supervisor for the ESP32-S3)
+# Start after the network and after any console getty that might grab the
+# serial port, so the brain owns the USB CDC link.
+After=network.target
+
+[Service]
+Type=simple
+# Run as a dedicated user; install script creates it and adds it to the dial
+# group (for /dev/ttyACM*). Adjust User= if you prefer your own account.
+User=robotowl
+Group=dial
+WorkingDirectory=/opt/robot-owl/rpi-brain
+ExecStart=/opt/robot-owl/rpi-brain/.venv/bin/python main.py /opt/robot-owl/rpi-brain/config.yaml
+Restart=on-failure
+RestartSec=3
+# Mild hardening. USB serial access is covered by the udev rule + dial group.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

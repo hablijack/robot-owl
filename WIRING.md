@@ -80,6 +80,47 @@ The firmware runs **USB CDC** (`ARDUINO_USB_CDC_ON_BOOT=1`, `ARDUINO_USB_MODE=1`
 
 ---
 
+## 🔊 Audio — MAX98357A (Adafruit) on the Raspberry Pi
+
+The owl's voice/output is a **MAX98357A** mono class-D amplifier (Adafruit 2980 / 3322) driven over the Pi's **I2S** bus. It takes a small speaker (4Ω or 8Ω) directly. It is **entirely on the Raspberry Pi side** — no ESP32 pins are used, so it does not touch the pin map above.
+
+The RPi brain generates short procedural sound effects (beeps/chirps) in-process and plays them through the amp with `aplay` (ALSA). All audio lives on the Pi; the ESP32 is not involved in sound.
+
+### Wire mapping (Pi 40-pin header → MAX98357A)
+
+| MAX98357A pin | Raspberry Pi pin | Function |
+|:-------------:|:----------------:|----------|----------|
+| **GND** | GND (pin 6/9/14/20/25) | Common ground |
+| **BCLK** | GPIO 18 (pin 12) | Bit clock |
+| **LRCLK** | GPIO 19 (pin 21) | Word-select (L/R) |
+| **DIN** | GPIO 21 (pin 40) | Serial data in |
+| **SD MODE** | 3.3V (pin 1) | **Tie to 3.3V** for I2S (leave floating = PWM) |
+| **GAIN** | 3.3V (pin 1) | High-gain mode (0 dB); tie to GND for −6 dB if too loud |
+| **VSUP** | 5V (pin 2/4) | Amp supply (5–35 V). 5 V is fine for a small speaker |
+| **Speaker +** | speaker + | 4Ω or 8Ω speaker |
+| **Speaker −** | speaker − | Speaker ground |
+
+> ⚠️ The **SD MODE pin must be tied to 3.3V** for I2S operation. Left floating, the amp defaults to PWM mode and the Pi's I2S output will be silent. This is the #1 "no sound" mistake.
+
+### Enable I2S on the Pi
+Add to `/boot/config.txt` (or `/boot/firmware/config.txt` on Bookworm) and reboot:
+```
+dtoverlay=hifiberry-i2s-lite
+```
+This maps the standard I2S pins (BCLK=18, LRCLK=19, DIN=21) to the `snd-soc-bcm2835` driver, so `aplay -l` shows a `bcm2835` playback device. (The MAX98357A needs no codec I2C address — it's a dumb amp — so no `dtparameter` is required.)
+
+### Verify
+```
+aplay -l                      # should list a bcm2835-I2S-hw-0 playback device
+sudo apt install espeak-ng    # optional: test with a real voice
+espeak-ng "hello owl"         # should speak through the speaker
+```
+
+### Software
+`brain/audio.py` generates WAV bytes in-process (no external assets) and plays them via `aplay` in a daemon thread, so the serial read loop is never blocked. See the **NDJSON Protocol** table in `README.md` for the `sound` command the RPi forwards.
+
+---
+
 ## 📊 I2C Bus Summary (Physically on D0 + D1)
 
 | Device | Address | SDA → D0 | SCL → D1 |

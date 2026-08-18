@@ -271,8 +271,14 @@ class SerialHandler:
         else:
             logger.debug("Owl message (unhandled): %s", data)
 
-    def read_loop(self, callback: Optional[Callable[[Telemetry], None]] = None):
-        """Main read loop - processes incoming serial data"""
+    def read_loop(self, callback: Optional[Callable[[Telemetry], None]] = None,
+                   idle_callback: Optional[Callable[[], None]] = None):
+        """Main read loop - processes incoming serial data.
+
+        callback: invoked for each parsed telemetry frame.
+        idle_callback: invoked on iterations where no data arrived (used to
+        run periodic checks such as telemetry-staleness detection).
+        """
         self._telemetry_callback = callback
 
         if not self.serial or not self.serial.is_open:
@@ -286,6 +292,8 @@ class SerialHandler:
                 # Read available data
                 data = self.serial.read(self.serial.in_waiting or 1)
                 if not data:
+                    if idle_callback:
+                        idle_callback()
                     continue
 
                 text = data.decode('utf-8', errors='ignore')

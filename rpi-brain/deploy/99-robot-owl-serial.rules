@@ -1,0 +1,9 @@
+# Grant the robotowl user read/write access to the ESP32-S3 USB CDC serial
+# port without needing root. The XIAO ESP32-S3 enumerates as a USB CDC ACM
+# device (usb_id 303a:1001). Install into /etc/udev/rules.d/ via install.sh.
+#
+# MODE="0660" and GROUP="dial" let any member of the dial group (e.g. the
+# robotowl service user) open the port.
+SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1001", MODE="0660", GROUP="dial"
+# Also cover the CDC port in case it shows up under a different subsystem.
+KERNEL=="ttyACM*", MODE="0660", GROUP="dial"

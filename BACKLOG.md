@@ -96,6 +96,74 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[!]` blocked
   `{"type":"error","msg":"line_too_long"}` before clearing, so a
   truncated/malformed frame is diagnosable instead of silent.
 
+## RPi-brain UX (2026-08-18)
+
+Ideas to make the RPi supervisor nicer to run and debug.
+
+### Service & startup
+
+- [x] **One-command setup script** — `rpi-brain/setup.sh` is the single entry
+  point for a fresh Raspberry Pi OS install: `sudo ./setup.sh`. It runs apt
+  (python3-venv/alsa-utils/rsync), adds the I2S `dtoverlay` to the correct
+  `config.txt` (`/boot` or `/boot/firmware`), installs the tree to
+  `/opt/robot-owl` + venv + requirements, creates the `robotowl` user in the
+  `dial` group, installs the udev rule, enables the systemd unit, then reboots
+  to apply I2S — with a one-shot boot hook that starts the robot and clears
+  itself. Idempotent. `deploy/install.sh` remains as the no-reboot/no-apt
+  variant for manual installs.
+- [x] **systemd service** — `deploy/robot-owl-brain.service` + `deploy/install.sh`
+  (copies the tree to `/opt/robot-owl/rpi-brain`, builds a `.venv`, creates a
+  `robotowl` system user in the `dial` group, installs a udev rule for the
+  ESP32 USB CDC port, then `enable`s the unit). Re-runnable. **Not yet run on
+  real hardware** — verify `install.sh` + `systemctl start` on the RPi.
+- [x] **Startup banner** — `brain/banner.py` prints an ASCII owl + firmware
+  version / serial port / config path / web-UI status once at launch (stdout,
+  so it shows in `journalctl`).
+- [x] **Nicer debug loglines** — `Supervisor` now keeps the latest frame in
+  `.last`, emits a 30s one-line liveness status (state, uptime, face, fw,
+  servo angles), and `check_stale()` (run from the read-loop idle path) warns
+  when no telemetry arrives for >10s (suppressed while in UPDATE mode, where
+  silence is expected).
+
+### Web UI (manual feature tester)
+
+A LAN-only Flask page (`brain/web_ui.py`, started from `main.py` when
+`web.enabled: true` in `config.yaml`) to poke the owl manually. Every action
+forwards the same NDJSON command the supervisor uses, so no firmware change is
+needed. The page polls `/api/telemetry` (1s) to show live state/face/servos.
+
+- [x] **Web UI scaffold** — Flask app in a daemon thread; `/` (control page)
+  + `/api/telemetry`, `/api/blink`, `/api/expression`, `/api/head`,
+  `/api/sleep`, `/api/wake`. Routes verified with a stub serial (all 200,
+  correct NDJSON forwarded).
+- [x] **"Blink once"** — button + speed selector (fast…very slow) →
+  `{"type":"blink","speed":N}`.
+- [x] **"Look <expression>"** — button grid (neutral/happy/sleepy/surprised/
+  angry/searching) → `{"type":"expression","value":...}` (3s overrides).
+- [x] **"Make a sound"** — audio is **RPi-side only**: the MAX98357A I2S amp
+  is wired to the Pi (see the new **Audio** section in `WIRING.md`), so no
+  firmware change is needed. `brain/audio.py` synthesizes short effects
+  (beep/chirp/happy/sad/alert) in-process as 16-bit mono WAV and plays them via
+  `aplay` in a daemon thread (never blocks the serial read loop); it degrades
+  to a logged no-op if `aplay`/I2S is unavailable. `Supervisor.play_sound()`
+  wraps it, `/api/sound` exposes it to the web UI (button grid), and the
+  supervisor auto-cues a matching effect on state transitions
+  (`detecting`→chirp, `interacting`→happy, `sleeping`→sad, `update`/`error`
+  →alert). Config: `audio.enabled` / `audio.device` / `audio.volume` in
+  `config.yaml`. **On-hardware TODO:** enable I2S
+  (`dtoverlay=hifiberry-i2s-lite` in `config.txt`), wire the amp (SD MODE →
+  3.3V!), then confirm `aplay -l` lists a bcm2835 device and the buttons are
+  audible.
+- [x] **"Move the head (arrow buttons)"** — 3×3 pad (up/left/center/right/
+  down) driving the head servo (`CH_HEAD`) with absolute angles
+  (±30° L/R, ±20° up/down, 0 center) → `{"type":"servo","channel":2,"angle":...}`.
+- [x] **Web UI safety/scope** — policy buttons (sleep/wake) exposed as
+  `/api/sleep` + `/api/wake` (endpoints ready; page buttons optional). No
+  auth (LAN only) — do not expose the port beyond the local network.
+
+**On-hardware TODO for the web UI:** enable `web.enabled: true`, then confirm
+the page loads and each button visibly drives the owl (blink/expression/head).
+
 ---
 
 ## Recently completed (context for future sessions)

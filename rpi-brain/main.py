@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from brain.serial_handler import SerialHandler
 from brain.supervisor import Supervisor
+from brain.banner import print_banner
+from brain.audio import Audio
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -36,7 +38,6 @@ def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     try:
         config = load_config(config_path)
-        logger.info(f"Loaded configuration from {config_path}")
     except FileNotFoundError:
         logger.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
@@ -44,29 +45,64 @@ def main():
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
 
+    serial_cfg = config['serial']
+    web_cfg = config.get('web', {})
+
     # Initialize serial handler
     serial = SerialHandler(
-        port=config['serial']['port'],
-        baudrate=config['serial']['baudrate'],
-        timeout=config['serial']['timeout']
+        port=serial_cfg['port'],
+        baudrate=serial_cfg['baudrate'],
+        timeout=serial_cfg['timeout']
     )
 
     if not serial.connect():
         logger.error("Failed to connect to ESP32. Check serial port.")
         sys.exit(1)
 
-    # Initialize supervisor
-    supervisor = Supervisor(serial, config)
+    # Initialize audio (MAX98357A I2S amp). Degrades to a no-op if the amp
+    # or I2S is not available, so the brain still runs without sound.
+    audio = Audio(config)
 
-    logger.info("Robot Owl Brain started (supervisor mode)")
-    logger.info("ESP32 owns behavior; waiting for telemetry...")
+    # Initialize supervisor (audio is used for state-change sound cues).
+    supervisor = Supervisor(serial, config, audio=audio)
+
+    # Startup banner (printed to stdout; also mirrored to the log).
+    print_banner(
+        firmware=supervisor._last_fw or "",
+        port=serial_cfg['port'],
+        baudrate=serial_cfg['baudrate'],
+        config_path=config_path,
+        web_ui=bool(web_cfg.get('enabled', False)),
+        audio=bool(audio.enabled and audio._ready),
+    )
+    logger.info("Robot Owl Brain started (supervisor mode); waiting for telemetry...")
+
+    # Optional web UI for manually testing features. Runs in a daemon thread
+    # so the serial read loop (below) stays the foreground loop.
+    web_server = None
+    if web_cfg.get('enabled', False):
+        try:
+            from brain.web_ui import WebUI
+            web_server = WebUI(
+                serial,
+                supervisor,
+                host=web_cfg.get('host', '0.0.0.0'),
+                port=web_cfg.get('port', 8080),
+            )
+            web_server.start()
+        except Exception as e:
+            logger.error(f"Web UI failed to start (continuing without it): {e}")
+            web_server = None
 
     try:
-        # Start the serial read loop
-        serial.read_loop(supervisor.on_telemetry)
+        # Start the serial read loop. The idle callback runs on quiet
+        # iterations so we can warn when telemetry goes stale.
+        serial.read_loop(supervisor.on_telemetry, supervisor.check_stale)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if web_server:
+            web_server.stop()
         serial.disconnect()
         logger.info("Disconnected from ESP32")
 

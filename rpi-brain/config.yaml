@@ -16,3 +16,21 @@ expressions:
   detecting: "detecting"
   sleeping: "sleeping"
   neutral: "neutral"
+
+# Optional web UI for manually testing features (blink, expressions, head).
+# It forwards the same NDJSON commands the supervisor uses and shows live
+# telemetry. LAN-only by default; there is NO authentication, so do not expose
+# this port beyond your local network.
+web:
+  enabled: false
+  host: 0.0.0.0
+  port: 8080
+
+# Audio via MAX98357A I2S amp on the Pi (see WIRING.md). The RPi generates
+# short sound effects in-process and plays them over I2S. If the amp is not
+# wired / I2S not enabled, the brain still runs and just logs that audio is
+# unavailable. 'device' is the ALSA card (from `aplay -l`); empty = default.
+audio:
+  enabled: true
+  device: ""          # e.g. "bcm2835-I2S-hw-0" (leave "" for default)
+  volume: 0.8        # 0.0 - 1.0 master gain applied to generated samples

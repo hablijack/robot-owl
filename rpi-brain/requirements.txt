@@ -2,3 +2,8 @@ pyserial>=3.5
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 pyyaml>=6.0
+flask>=3.0.0
+# Audio (MAX98357A I2S amp): playback via ALSA 'aplay'; WAV built with stdlib
+# (wave + struct). No extra Python package required — 'aplay' ships with the
+# Raspberry Pi OS (alsa-utils).
+
