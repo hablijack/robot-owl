@@ -38,7 +38,20 @@ HEAD_CENTER = 0
 EXPRESSIONS = ["neutral", "happy", "sleepy", "surprised", "angry", "searching"]
 
 # Sound effects the RPi can play through the MAX98357A amp (see brain/audio.py).
-SOUNDS = ["beep", "chirp", "happy", "sad", "alert"]
+# The owl-call voices (detecting/interacting/happy/sleeping/waking/alert) play a
+# real recording when present, else a synthesized tone of the same name.
+SOUNDS = ["detecting", "interacting", "happy", "sleeping", "waking", "alert", "beep"]
+
+# Friendly labels for the sound buttons (value -> display text).
+SOUND_LABELS = {
+    "detecting": "Hoot (spotted)",
+    "interacting": "Hoot (talking)",
+    "happy": "Hoot (happy)",
+    "sleeping": "Hoot (sleepy)",
+    "waking": "Hoot (waking)",
+    "alert": "Hoot (alert)",
+    "beep": "Beep",
+}
 
 TEMPLATE = r"""<!doctype html>
 <html lang="en">
@@ -134,6 +147,7 @@ TEMPLATE = r"""<!doctype html>
 const $ = (s) => document.querySelector(s);
 const exprs = {{ expressions | tojson }};
 const sounds = {{ sounds | tojson }};
+const soundLabels = {{ sound_labels | tojson }};
 
 // Build expression buttons.
 const expWrap = $('#expressions');
@@ -149,7 +163,7 @@ for (const e of exprs) {
 const sndWrap = $('#sounds');
 for (const s of sounds) {
   const b = document.createElement('button');
-  b.textContent = s[0].toUpperCase() + s.slice(1);
+  b.textContent = soundLabels[s] || (s[0].toUpperCase() + s.slice(1));
   b.dataset.act = 'sound';
   b.dataset.value = s;
   sndWrap.appendChild(b);
@@ -228,7 +242,8 @@ class WebUI:
 
         @app.route("/")
         def index():
-            return render_template_string(TEMPLATE, expressions=EXPRESSIONS, sounds=SOUNDS)
+            return render_template_string(TEMPLATE, expressions=EXPRESSIONS, sounds=SOUNDS,
+                                           sound_labels=SOUND_LABELS)
 
         @app.route("/api/telemetry")
         def api_telemetry():

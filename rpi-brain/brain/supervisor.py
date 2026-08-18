@@ -161,11 +161,15 @@ class Supervisor:
     # ------------------------------------------------------------------
     # Sound cues tied to behavior state transitions
     # ------------------------------------------------------------------
+    # Each behavior state maps to a distinct recorded owl-call (see
+    # assets/sounds/). If a recording is missing, Audio falls back to a
+    # synthesized tone of the same name, so cues still work.
     _STATE_SFX = {
-        "detecting": "chirp",
-        "interacting": "happy",
-        "sleeping": "sad",
-        # also covers the wake-up moment
+        "detecting": "detecting",
+        "interacting": "interacting",
+        "sleeping": "sleeping",
+        "waking": "waking",
+        # also covers the wake-up / attention moments
         "update": "alert",
         "error": "alert",
     }
