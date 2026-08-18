@@ -1,0 +1,18 @@
+# Robot Owl RPi Brain Configuration
+
+serial:
+  port: /dev/ttyACM0
+  baudrate: 115200
+  timeout: 1
+
+# The ESP32 owns behavior timing (see esp32-s3-sense/include/config.h).
+# The RPi supervisor only sends these expression names as temporary overrides.
+expressions:
+  happy: "happy"
+  sleepy: "sleepy"
+  surprised: "surprised"
+  angry: "angry"
+  searching: "searching"
+  detecting: "detecting"
+  sleeping: "sleeping"
+  neutral: "neutral"
