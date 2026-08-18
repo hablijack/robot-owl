@@ -42,15 +42,21 @@ source it:
    dB above the measured noise floor are gated to silence with a short attack /
    longer release to avoid clicks.
 5. **Robot effect chain** (the "robot owl" voice):
-   - *Hoots* (detecting / interacting / happy / waking / alert): **8-bit
-     bitcrush** → **ring-modulation** at 7 Hz (a slow, smooth warble — a faster
-     rate stutters) → **hard-clip distortion** (drive 4) → **EQ** with a +3 dB
-     low-shelf (120–400 Hz) so the hoot body survives the small speaker, plus a
-     gentle high-frequency roll-off.
+   - *Hoots* (detecting / interacting / happy / waking): **8-bit bitcrush** →
+     **ring-modulation** at 7 Hz (a slow, smooth warble — a faster rate stutters)
+     → **hard-clip distortion** (drive 4) → **EQ** with a +3 dB low-shelf
+     (120–400 Hz) so the hoot body survives the small speaker, plus a gentle
+     high-frequency roll-off.
+   - *Alert* (Great Horned Owl): **light 12-bit bitcrush** → hard-clip (drive 5)
+     → +4 dB low-shelf, **no ring-mod** (the warble read as "strange" for an
+     alarm). Punchy and sharp, not buzzy.
    - *Sleeping*: **11-bit bitcrush** → a very light 5 Hz ring-mod hum (12 %
      depth, no hard clip) → +2 dB low-shelf. Kept soft, not buzzy.
-6. **RMS-matched** all six to a shared loudness (target RMS 0.12) with a peak
-   cap at 0.9, then wrote 22050 Hz mono 16-bit WAVs.
+6. **Fades**: every clip gets a short **fade-in (25 ms) / fade-out (120 ms)**
+   so starts and ends don't click or feel abrupt.
+7. **RMS-matched** to a shared loudness (target RMS 0.12) with a peak cap at
+   0.9, then wrote 22050 Hz mono 16-bit WAVs. The alert is a touch peakier, so
+   it's nudged to RMS 0.15 to match the others' *perceived* loudness.
 
 `ffmpeg` + `numpy` were used for decoding/analysis/effects. If you want
 different calls, swap the source IDs above and re-run the same steps.
