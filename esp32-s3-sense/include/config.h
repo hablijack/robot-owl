@@ -6,9 +6,9 @@
 // patch on fixes.
 // ============================================================================
 #define FW_VERSION_MAJOR 1
-#define FW_VERSION_MINOR 1
+#define FW_VERSION_MINOR 2
 #define FW_VERSION_PATCH 0
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
 
 // ============================================================================
 // Board & System
@@ -129,3 +129,11 @@
 // Temporary overrides sent by the RPi supervisor (do not change state)
 #define EXPRESSION_OVERRIDE_MS 3000 // how long an RPi expression override lasts
 #define GAZE_OVERRIDE_MS 3000       // how long an RPi gaze override lasts
+
+// Navigation: the RPi re-sends the nav angle on each refresh. If it stops
+// (serial link dropped, RPi crashed/rebooted) for this long, the owl recenters
+// its head and leaves NAVIGATING so it is never left stuck pointing somewhere.
+// Must be comfortably larger than the RPi's refresh interval (see
+// rpi-brain config.yaml navigation.refresh_min_s) but small enough that a dead
+// link is noticed quickly.
+#define NAV_TIMEOUT_MS 5000

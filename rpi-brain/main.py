@@ -18,6 +18,7 @@ from brain.serial_handler import SerialHandler
 from brain.supervisor import Supervisor
 from brain.banner import print_banner
 from brain.audio import Audio
+from brain.speech import Speech
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -77,6 +78,17 @@ def main():
     )
     logger.info("Robot Owl Brain started (supervisor mode); waiting for telemetry...")
 
+    # Optional speech recognition: hears the user (USB mic) and reacts via the
+    # owl's existing expression/gaze overrides + amp audio. Disabled by default
+    # (speech.enabled: false) so existing deployments are unaffected. Runs in a
+    # daemon thread so the serial read loop (below) stays the foreground loop.
+    speech = Speech(serial, supervisor, config)
+    try:
+        speech.start()
+    except Exception as e:
+        logger.error(f"Speech failed to start (continuing without it): {e}")
+        speech = None
+
     # Optional web UI for manually testing features. Runs in a daemon thread
     # so the serial read loop (below) stays the foreground loop.
     web_server = None
@@ -88,6 +100,7 @@ def main():
                 supervisor,
                 host=web_cfg.get('host', '0.0.0.0'),
                 port=web_cfg.get('port', 8080),
+                speech=speech,
             )
             web_server.start()
         except Exception as e:
@@ -96,11 +109,16 @@ def main():
 
     try:
         # Start the serial read loop. The idle callback runs on quiet
-        # iterations so we can warn when telemetry goes stale.
-        serial.read_loop(supervisor.on_telemetry, supervisor.check_stale)
+        # iterations so we can warn when telemetry goes stale AND (Phase 4)
+        # evaluate the autonomous sleep-on-inactivity policy. check_stale and
+        # check_auto_sleep are both no-ops unless their feature is enabled.
+        serial.read_loop(supervisor.on_telemetry,
+                         lambda: (supervisor.check_stale(), supervisor.check_auto_sleep()))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if speech:
+            speech.stop()
         if web_server:
             web_server.stop()
         serial.disconnect()

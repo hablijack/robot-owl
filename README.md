@@ -63,8 +63,8 @@ Full pin map + the SD-MODE-to-3.3V gotcha are in `WIRING.md`.
 ┌──────────────────────────▼──────────────────────────────┐
 │              ESP32-S3 Firmware (Arduino)                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
- │  │ Serial Parser│  │State Machine │  │ Face Detector │  │
- │  │(NDJSON recv) │  │(7 states)    │  │ (esp-dl MSR01)│  │
+  │  │ Serial Parser│  │State Machine │  │ Face Detector │  │
+  │  │(NDJSON recv) │  │(8 states)    │  │ (esp-dl MSR01)│  │
 │  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘  │
 │         └──────────────────┼──────────────────┘          │
 │                    Telemetry Sender                      │
@@ -77,7 +77,7 @@ Full pin map + the SD-MODE-to-3.3V gotcha are in `WIRING.md`.
 ```
 
 ### State Machine (ESP32)
-Seven states. The ESP32 owns this machine and runs it autonomously from local
+Eight states. The ESP32 owns this machine and runs it autonomously from local
 inputs (vibration sensor + on-device face detection):
 
 | State | Eye Expression | Behavior |
@@ -87,8 +87,33 @@ inputs (vibration sensor + on-device face detection):
 | **DETECTING** | DETECTING | Face confirmed → INTERACTING; no face for 10s → IDLE |
 | **INTERACTING** | HAPPY | Gaze follows face; face lost for 5s → IDLE |
 | **SLEEPING** | SLEEPING (closed) | Eyes closed, servos centered; wake command → IDLE |
+| **NAVIGATING** | SEARCHING | Head held at the RPi's compass bearing (a *persistent* `nav` override, not the 3s gaze override); `nav active:false` or a 5s no-refresh timeout → IDLE |
 | **UPDATE** | UPDATE (spinner) | SoftAP + `/update` HTTP server; 4-tap vibration enters, one tap exits |
 | **ERROR** | — | Hardware init failure |
+
+### Navigation — "Guide me home" (live compass)
+The owl can point its head at a **named destination** and keep pointing there as
+you walk — a live compass. All the math lives on the RPi (it already parses the
+GPS fix + IMU yaw from every telemetry frame); the ESP32 just holds the head at
+the angle the RPi sends.
+
+- **Teach places** in the web UI **Places** card: name + lat/lon, typed directly
+  or dropped on the embedded OpenStreetMap/Leaflet picker (no API key).
+  Saved to `~/.config/robot-owl/locations.json`.
+- **Start** by voice — *"Bring mich nach Home"*, *"Zeig mir den Weg zum Hotel"*,
+  *"Wie komme ich zum Zoo?"* — or from the web UI **Navigate** card.
+- **What you'll see**: the owl enters the NAVIGATING state (focussed eyes) and
+  its head turns to point at the destination, re-aiming roughly every 0.5 s from
+  live GPS + heading. The web UI shows `to <name> · <distance> m · bearing <deg>°
+  · head at <aim>°`.
+- **Exit** (any one of four, whichever comes first): a spoken stop phrase
+  (*"Danke"*, *"Stopp die navigation"*), the web UI **Stop** button, **arrival**
+  (within `arrive_m` of the target), or a **timeout** (the head recenters if the
+  RPi stops sending).
+- The head only turns ±45°; a destination behind the owl is clamped to the
+  nearest edge (the web UI says it's behind you).
+
+Full design, math, and open questions: `NAVIGATION_PLAN.md`.
 
 ### Eye Renderer
 - Two 160×160 LCDs with PSRAM framebuffers (2×51.2 KB each)
@@ -282,15 +307,21 @@ sudo ./setup.sh
 
 `setup.sh` (idempotent — safe to re-run) does, in order:
 
-1. **apt** — installs `python3-venv`, `python3-pip`, `alsa-utils` (for `aplay`), `rsync`.
+1. **apt** — installs `python3-venv`, `python3-pip`, `alsa-utils` (for `aplay`), `rsync`, `portaudio19-dev`.
 2. **I2S audio** — adds `dtoverlay=hifiberry-i2s-lite` to the right `config.txt`
    (handles both `/boot` and Bookworm's `/boot/firmware`) so the MAX98357A amp works.
-3. **Install** — copies the brain to `/opt/robot-owl/rpi-brain`, builds a `.venv`,
-   installs `requirements.txt`.
-4. **User + permissions** — creates the `robotowl` system user in the `dial` group
+3. **Config wizard** — asks a few questions (ESP32 serial port, web UI, speech
+   recognition + Whisper model, auto-sleep) and writes `config.yaml` with your
+   choices. **Useful defaults are pre-filled — just press Enter to accept.** It
+   auto-detects the ESP32 serial port and any USB mic.
+4. **Install** — copies the brain to `/opt/robot-owl/rpi-brain`, builds a `.venv`,
+   installs `requirements.txt` (incl. **faster-whisper** — offline ASR, no torch).
+5. **Pre-download the Whisper model** — so the first live transcription is instant
+   instead of a several-minute download.
+6. **User + permissions** — creates the `robotowl` system user in the `dial` group
    and installs a udev rule so it can open the ESP32 USB CDC serial port.
-5. **systemd** — installs + enables `robot-owl-brain.service`.
-6. **Reboot** — reboots to apply the I2S overlay; the robot auto-starts on boot
+7. **systemd** — installs + enables `robot-owl-brain.service`.
+8. **Reboot** — reboots to apply the I2S overlay; the robot auto-starts on boot
    (a one-shot hook guarantees it, then clears itself).
 
 After the reboot the owl is running. Then:
@@ -301,9 +332,10 @@ systemctl status robot-owl-brain       # check state
 aplay -l                                # confirm the I2S amp is visible
 ```
 
-> To use the web UI, set `web.enabled: true` in `/opt/robot-owl/rpi-brain/config.yaml`
-> and open `http://<pi-ip>:8080` (LAN only, no auth). If the serial port isn't
-> `/dev/ttyACM0`, edit `serial.port` in that file (`ls /dev/ttyACM*`).
+> The wizard already set the web UI / speech / auto-sleep options. To change
+anything later, edit `/opt/robot-owl/rpi-brain/config.yaml` (or re-run
+`sudo ./setup.sh` to go through the wizard again). For an unattended install use
+`sudo ./setup.sh --non-interactive` to skip the wizard and keep the bundled defaults.
 
 ---
 
@@ -428,8 +460,9 @@ python main.py [config.yaml]   # Default config path
 | **PA1010D GPS** | ✅ Complete | Native I2C (Adafruit_GPS), RMC+GGA NMEA parsing |
 | **SW420 Vibration** | ✅ Complete | Digital input with debounce, event counting |
 | **PCA9685 Servo Ctrl** | ✅ Complete | 5 channels, smooth interpolation (2°/iteration) |
-| **State Machine** | ✅ Complete | 7 states on ESP32 (owns behavior): BOOT/IDLE/DETECTING/INTERACTING/SLEEPING/UPDATE/ERROR |
-| **NDJSON Protocol** | ✅ Complete | Telemetry (500ms) + commands (expression/servo/gaze/wake/blink/heartbeat) |
+| **State Machine** | ✅ Complete | 8 states on ESP32 (owns behavior): BOOT/IDLE/DETECTING/INTERACTING/SLEEPING/NAVIGATING/UPDATE/ERROR |
+| **NDJSON Protocol** | ✅ Complete | Telemetry (500ms) + commands (expression/servo/gaze/nav/wake/blink/heartbeat) |
+| **Navigation "guide me home"** | ✅ Implemented | RPi computes the compass bearing to a named destination and streams the head aim; ESP32 holds it in the NAVIGATING state (live compass). Start via voice ("Bring mich nach Home") or web UI; exit via spoken keyword, web UI, arrival, or timeout. See `NAVIGATION_PLAN.md`. On-hardware `aim_sign` verification pending |
 | **Face Detection (ESP32)** | ✅ Complete | esp-dl `HumanFaceDetectMSR01`, OV2640 QVGA RGB565, gaze offsets + state transitions on-device |
 | **OTA Update Mode** | ✅ Complete | 4-tap vibration → SoftAP `RobotOwl-Update` + `/update` HTTP page (HTTPUpdateServer); one tap exits; dual-bank ota_0/ota_1; standalone boot (5s USB wait) |
 | **Face Detection (RPi)** | ❌ Not implemented | OpenCV/MediaPipe fallback not needed (ESP32 does it); optional future enhancement |

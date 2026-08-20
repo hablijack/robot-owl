@@ -58,12 +58,105 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[!]` blocked
 - [ ] **RPi face-detection fallback** — explicitly NOT needed (ESP32 does it).
   Only revisit if on-device detection is later disabled.
 
+## Speech recognition (RPi-side)
+
+Phase 1 (skeleton), Phase 2 (mic + VAD + ASR), Phase 3 ("last heard" in web
+UI) and Phase 4 (autonomous sleep + wake-on-speech) code is **done and
+unit-tested on the Mac** (38 tests, stubbed serial/supervisor/mic/Whisper).
+See `SPEECH_RECOGNITION_PLAN.md`. The RPi `Speech` class captures a USB mic,
+runs an energy VAD, and on a gated utterance transcribes with **faster-whisper**
+(`tiny`, int8 on CPU — the CTranslate2 engine, no torch, ~4× faster than
+openai-whisper) and drives a *temporary* reaction (expression/gaze/audio) via
+the existing override path — no firmware change.
+
+**Setup is now a single interactive command:** `sudo ./setup.sh` runs a config
+wizard (serial port, web UI, speech, auto-sleep — useful defaults, Enter to
+accept) and pre-downloads the Whisper model, so the first live transcription is
+instant. `sudo ./setup.sh --non-interactive` keeps the bundled defaults for
+unattended installs.
+
+- [~] **Verify Phase 2 + 3 + 4 on hardware** — enable `speech.enabled: true` (+
+  `web.enabled: true` for the "last heard" line, + `supervisor.auto_sleep.enabled: true`
+  to test autonomous sleep), plug the USB mic, and confirm:
+  - Phase 2/3: speak "toll" / "wer bist du" / "lass das" with a face in frame → correct
+    eyes + owl call and the web UI's Live status card shows the transcript + "Ns ago"; the
+    4.5 s cooldown is respected; 10 min of TV/room noise with no face → zero reactions;
+    `journalctl -u robot-owl-brain` shows no serial stall. Tune `speech.vad_threshold`
+    against the real mic's noise floor (default 0.02) and `speech.window_s`.
+  - Phase 4: leave the owl alone (no face / no taps / no speech) → after
+    `supervisor.auto_sleep.after_s` it goes to sleep on its own; then tap it or show a
+    face → it wakes immediately; say the wake keyword → it wakes.
+- [x] **Phase 3 — "last heard" in web UI** — `Speech` records `last_heard_at`;
+  `WebUI` takes an optional `speech=` and `/api/telemetry` exposes
+  `last_heard: {text, at}` (omitted when speech is off, so the payload is
+  unchanged otherwise). The page renders a "heard *…* (Ns ago)" line. 4 unit
+  tests cover the seam; all 25 tests pass. (Hardware check folded into the item above.)
+- [x] **Phase 4 (revised) — autonomous sleep on inactivity + wake on speech** —
+  *No command forces sleep; no firmware change.* The RPi watches the existing
+  telemetry (face / vibration) + its own speech events; after `supervisor.auto_sleep.after_s`
+  with **no** interaction trigger it sends the **existing** `sleep` command (disabled by
+  default). The owl's *wake* is mostly already in the firmware (it self-wakes on a
+  face or a vibration); the one new thing is **wake-on-speech** — the RPi sends the
+  existing `wake` command when it hears the user while the owl is asleep. All RPi-brain:
+  `supervisor.py` (inactivity timer → `sleep`), `speech.py` (wake-exception gate → `wake`),
+  `config.yaml` (`auto_sleep.*`). **Code done + 13 unit tests** drive the real
+  `Supervisor`/`Speech` against stubs (see `SPEECH_RECOGNITION_PLAN.md` §Phase 4 for the
+  full design + the conservative wake-gate decision). Hardware check folded into the
+  "Verify on hardware" item above (add: leave the owl alone → it sleeps on its own after
+  `after_s`; say the wake keyword → it wakes).
+
+## Navigation — "guide me home" (live compass)
+
+The owl points its head at a **named destination** and keeps re-aiming from live
+GPS + IMU heading — a live compass. All the math is on the RPi (it already parses
+the GPS fix + IMU yaw); the ESP32 just holds the head at the angle it's sent.
+Full design + math + open questions: `NAVIGATION_PLAN.md`.
+
+**Implemented + tested on the Mac (no hardware):**
+- [x] **RPi core** — `brain/geo.py` (bearing/haversine/wrap/aim, pure),
+  `brain/locations.py` (name→{lat,lon} JSON store), `brain/navigation.py`
+  (controller: start/stop/on_telemetry, rate-limited re-aim, four exit paths).
+- [x] **Speech start/stop** — `nav_triggers` ("bring mich nach …") checked
+  *before* the reaction clusters so a nav sentence isn't stolen by "wie"; a
+  dedicated stop keyword ("danke", "stopp die navigation") that is **exempt
+  from the cooldown and the face-gate** and works even while the owl is asleep.
+- [x] **Web UI** — Places card (add/remove/list + OpenStreetMap/Leaflet map
+  picker, no API key) + Navigate card (start/stop + live bearing/distance/aim)
+  + `/api/locations*` and `/api/nav/start|stop` endpoints.
+- [x] **Firmware** — 8th state `NAVIGATING` (holds the head at the RPi's
+  compass angle; `SEARCHING` eyes; 5 s no-refresh self-timeout → IDLE) + the
+  `nav {angle, active}` command + `nav_ack` + a `navigation` telemetry field.
+  `FW_VERSION` 1.1.0 → 1.2.0. Compiles clean under PlatformIO.
+- [x] **Tests** — 104 pass (geo math, controller state machine incl. the four
+  exit paths, speech start/stop precedence, web UI endpoints).
+- [x] **Docs** — `README.md` (8-state table + a Navigation section) and this
+  entry; `NAVIGATION_PLAN.md` checklist marked done.
+
+**On-hardware (needs the Pi/ESP32) — the test procedure:**
+1. [ ] **Flash 1.2.0** — 4-tap OTA (join `RobotOwl-Update` AP → `/update`) or
+   USB; confirm `journalctl -u robot-owl-brain` shows `fw 1.2.0`.
+2. [ ] **Nav command moves the head** — from the web UI Navigate card, pick a
+   place and hit **Start**; the head should turn and *hold* (NAVIGATING, not
+   snap back to center). **Stop** should recenter it.
+3. [ ] **Verify `aim_sign`** (the one unknown, §10.1): stand the owl facing a
+   known direction, read its BNO055 yaw from the web UI, and Start navigation to
+   a place whose bearing you know (e.g. due north). If the head points the
+   *opposite* way, set `navigation.aim_sign: -1` in `config.yaml` and restart — a
+   config fix, not a re-code.
+4. [ ] **Live end-to-end** — teach a place in the web UI (map picker or manual
+   lat/lon), say *"Bring mich nach <name>"*, and walk toward it: the head should
+   keep re-aiming (a live compass). Exercise all four exits — spoken stop phrase,
+   web UI Stop, arrival (within `arrive_m`), and the 5 s no-refresh timeout —
+   and confirm each recenters the head cleanly.
+5. [ ] **Confirm yaw ≈ compass heading** and that the ~3–10 m GPS accuracy is
+   acceptable for the 15 m `arrive_m` threshold (see `NAVIGATION_PLAN.md` §10).
+
 ## Hardware
 
 - [ ] **Mechanical assembly** — 3D print / enclosure, servo mounting for
-  ears/head/wings, LCD bezels. (Wiring is documented in `WIRING.md`.)
+   ears/head/wings, LCD bezels. (Wiring is documented in `WIRING.md`.)
 - [ ] **First-run checklist** — no step yet for testing update mode end-to-end
-  (4-tap → join AP → flash → tap to exit). Add one once hardware is assembled.
+   (4-tap → join AP → flash → tap to exit). Add one once hardware is assembled.
 
 ## Code review (2026-08-18)
 
@@ -104,9 +197,12 @@ Ideas to make the RPi supervisor nicer to run and debug.
 
 - [x] **One-command setup script** — `rpi-brain/setup.sh` is the single entry
   point for a fresh Raspberry Pi OS install: `sudo ./setup.sh`. It runs apt
-  (python3-venv/alsa-utils/rsync), adds the I2S `dtoverlay` to the correct
-  `config.txt` (`/boot` or `/boot/firmware`), installs the tree to
-  `/opt/robot-owl` + venv + requirements, creates the `robotowl` user in the
+  (python3-venv/alsa-utils/rsync/portaudio), adds the I2S `dtoverlay` to the
+  correct `config.txt` (`/boot` or `/boot/firmware`), runs an **interactive
+  config wizard** (serial port / web UI / speech / auto-sleep — useful
+  defaults, Enter to accept; `--non-interactive` skips it), installs the tree
+  to `/opt/robot-owl` + venv + requirements (faster-whisper, no torch),
+  **pre-downloads the Whisper model**, creates the `robotowl` user in the
   `dial` group, installs the udev rule, enables the systemd unit, then reboots
   to apply I2S — with a one-shot boot hook that starts the robot and clears
   itself. Idempotent. `deploy/install.sh` remains as the no-reboot/no-apt
@@ -175,5 +271,6 @@ the page loads and each button visibly drives the owl (blink/expression/head).
   parses the `update` object; `Supervisor` logs the AP ssid/password/url on
   entry and a confirmation on exit.
 - [x] **README corrected** — state machine documented as 7 states (was 6),
-  OTA line flipped from "not implemented" to implemented, protocol + status
-  tables updated.
+   OTA line flipped from "not implemented" to implemented, protocol + status
+   tables updated. (Since then: an 8th state, NAVIGATING, was added for the
+   "guide me home" compass — see the Navigation section above.)

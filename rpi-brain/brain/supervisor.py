@@ -15,6 +15,8 @@ import logging
 from typing import Optional
 
 from brain.serial_handler import SerialHandler, Telemetry
+from brain.locations import LocationsStore, DEFAULT_LOCATIONS_FILE
+from brain.navigation import Navigation
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +44,58 @@ class Supervisor:
         self._stale_after_s = 10.0
         self._last_heartbeat = 0.0
 
+        # Phase 4: autonomous "fall asleep on inactivity" policy. The owl is
+        # put to sleep (via the existing firmware "sleep" command) after
+        # `after_s` with NO interaction trigger (face / vibration / speech).
+        # The mirror image -- waking -- is mostly the firmware's job (it already
+        # self-wakes on a face or a vibration); the RPi adds "wake on speech".
+        # Disabled by default so existing deployments are unaffected.
+        auto_sleep_cfg = (config or {}).get("supervisor", {}).get("auto_sleep", {})
+        self.auto_sleep_enabled = bool(auto_sleep_cfg.get("enabled", False))
+        self.auto_sleep_after_s = float(auto_sleep_cfg.get("after_s", 60))
+        # Epoch seconds of the most recent interaction trigger (face, vibration,
+        # or speech). Exposed to the Speech worker so it can reset the timer
+        # when it hears the user. 0.0 until the first trigger.
+        self.last_activity: float = 0.0
+        self._last_auto_sleep_sent = 0.0
+
+        # Navigation ("guide me home"): the RPi computes a compass bearing to a
+        # named destination and tells the ESP32 which way to point the head.
+        # The store is loaded from disk here (so the web UI and speech share it);
+        # the controller is attached by main.py once the Speech/web refs exist.
+        nav_cfg = (config or {}).get("navigation", {})
+        nav_file = nav_cfg.get("locations_file") or DEFAULT_LOCATIONS_FILE
+        self.locations = LocationsStore(nav_file)
+        self.navigation = Navigation(serial, self, self.locations, config)
+
     def on_telemetry(self, telemetry: Telemetry) -> None:
         """Handle a telemetry frame from the ESP32 (called by the read loop)."""
         now = time.time()
         self.last = telemetry
+
+        # Phase 4: an interaction trigger (a face in frame or a vibration/tap)
+        # counts as "the environment is active" and resets the auto-sleep timer.
+        # A face is only a trigger while the owl is awake: once it is SLEEPING
+        # the firmware self-wakes on the face (and re-enters DETECTING), so the
+        # wake is already in flight -- we must not, in the same frame, treat that
+        # same face as "activity" and cancel a pending sleep. The Speech worker
+        # separately resets this timer when it hears the user (see
+        # Speech._register_activity).
+        #
+        # Navigation is ALSO a trigger: while the owl is guiding you home you
+        # may be walking with no face in frame, and it must not fall asleep
+        # mid-navigation. (check_auto_sleep likewise never sleeps while
+        # navigating.)
+        if self.auto_sleep_enabled and self.last_state not in ("sleeping", "update"):
+            if (telemetry.face and telemetry.face.detected) or \
+               (telemetry.vibration and telemetry.vibration.detected) or \
+               (self.navigation and self.navigation.is_active()):
+                self.last_activity = now
+
+        # Navigation: forward every frame so the controller can re-aim the head
+        # from the freshest GPS + heading, and handle arrival / self-timeout.
+        if self.navigation is not None:
+            self.navigation.on_telemetry(telemetry)
 
         # Log the firmware version once (and again if it changes, e.g. after
         # an OTA update).
@@ -123,6 +173,62 @@ class Supervisor:
             self.last = None  # avoid re-warning every loop until a frame lands
 
     # ------------------------------------------------------------------
+    # Phase 4: autonomous sleep on inactivity
+    # ------------------------------------------------------------------
+    def register_activity(self, now: float = None) -> None:
+        """Record that the user just interacted (the RPi heard them speak).
+
+        Called by the Speech worker when it transcribes an utterance. Resets the
+        inactivity timer so the owl is not put to sleep while the user is
+        talking to it. (A face or a vibration resets the timer on their own via
+        on_telemetry.)
+        """
+        if self.auto_sleep_enabled:
+            self.last_activity = now if now is not None else time.time()
+
+    def check_auto_sleep(self, now: float = None) -> None:
+        """Put the owl to sleep if the environment has been quiet too long.
+
+        Called from the idle loop (serial_handler invokes it on quiet
+        iterations). It is a pure policy decision on the RPi side: when the owl
+        is awake and no interaction trigger (face / vibration / speech) has been
+        seen for `auto_sleep_after_s`, send the firmware's existing "sleep"
+        command. The firmware then runs its own SLEEPING state, which it already
+        knows how to wake on a face or a vibration.
+
+        Guards:
+          * no-op unless auto_sleep is enabled;
+          * never sends while the owl is already SLEEPING (idempotent);
+          * never sends while in UPDATE mode (the owl is on an isolated SoftAP
+            and unreachable over the normal serial link);
+          * rate-limited to one "sleep" send per `after_s` window, so a stale
+            link (no new frames) does not spam the command.
+        """
+        if not self.auto_sleep_enabled:
+            return
+        if self.last is None:
+            return
+        now = now if now is not None else time.time()
+        state = self.last_state or (self.last.state if self.last else None)
+        if state in ("sleeping", "update"):
+            return
+        # Never auto-sleep while guiding: the owl is actively pointing the user
+        # somewhere and may have no face in frame while they walk.
+        if self.navigation is not None and self.navigation.is_active():
+            return
+        # Baseline: with no trigger yet, start the clock from the first frame.
+        if self.last_activity == 0.0:
+            self.last_activity = now
+        if (now - self.last_activity) >= self.auto_sleep_after_s:
+            if (now - self._last_auto_sleep_sent) >= self.auto_sleep_after_s:
+                logger.info(
+                    "Auto-sleep: no interaction for %.0fs (no face/tap/speech) -> putting owl to sleep",
+                    now - self.last_activity,
+                )
+                self._last_auto_sleep_sent = now
+                self.sleep()
+
+    # ------------------------------------------------------------------
     # Policy commands (change the owl's state)
     # ------------------------------------------------------------------
     def sleep(self) -> bool:
@@ -134,6 +240,20 @@ class Supervisor:
         """Wake the owl from sleep."""
         logger.info("Supervisor: wake")
         return self.serial.send_command({"type": "wake"})
+
+    # Navigation ("guide me home"): thin wrappers over the Navigation controller
+    # so the web UI and speech can start/stop it through the supervisor.
+    def nav_start(self, name: str) -> bool:
+        """Start guiding toward a named location (no-op / False if unknown)."""
+        if self.navigation is None:
+            return False
+        return self.navigation.start(name)
+
+    def nav_stop(self, reason: str = "command") -> bool:
+        """Stop guiding (head recenters)."""
+        if self.navigation is None:
+            return False
+        return self.navigation.stop(reason)
 
     # ------------------------------------------------------------------
     # Temporary overrides (do NOT change the owl's state)

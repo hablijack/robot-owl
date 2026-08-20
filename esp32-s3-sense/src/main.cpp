@@ -38,6 +38,7 @@ enum class State {
     DETECTING,
     INTERACTING,
     SLEEPING,
+    NAVIGATING,
     UPDATE,
     ERROR
 };
@@ -47,6 +48,8 @@ static uint32_t lastTelemetry = 0;
 static uint32_t lastFaceSeen = 0;
 static uint32_t lastFaceDetect = 0;
 static uint32_t updateModeSince = 0;
+static uint32_t navSince = 0;
+static float navTargetAngle = 0.0f;
 
 // Temporary overrides from the RPi supervisor. These take precedence over the
 // state-driven expression/gaze until they expire or the state changes. They
@@ -143,6 +146,37 @@ void handleCommand(const char* json) {
         overrideGazeUntil = millis() + GAZE_OVERRIDE_MS;
         eyes.setGaze(overrideGazeX, overrideGazeY);
 
+    } else if (strcmp(type, "nav") == 0) {
+        // Persistent navigation command from the supervisor. Unlike the 3s
+        // expression/gaze overrides, this HOLDS: active=true enters/keeps the
+        // NAVIGATING state and points the head at `angle` until an active=false
+        // arrives (or the firmware's own timeout fires). The RPi recomputes the
+        // bearing from live GPS + heading and re-sends the angle each refresh,
+        // so the head tracks the destination.
+        float angle = doc["angle"];
+        bool active = doc["active"] | false;
+        if (active) {
+            navTargetAngle = angle;
+            if (currentState != State::NAVIGATING) {
+                transitionTo(State::NAVIGATING);
+            }
+            navSince = millis();  // (re)arm the self-timeout on every update
+            eyes.setGaze(0, 0);
+            servos.setAngle(CH_HEAD, angle);
+        } else {
+            navTargetAngle = 0.0f;
+            if (currentState == State::NAVIGATING) {
+                transitionTo(State::IDLE);
+            }
+            eyes.setGaze(0, 0);
+            servos.setAngle(CH_HEAD, 0);
+        }
+        resp["type"] = "nav_ack";
+        resp["active"] = active;
+        resp["angle"] = angle;
+        serializeJson(resp, out);
+        Serial.println(out);
+
     } else if (strcmp(type, "sleep") == 0) {
         // Policy command: put the owl to sleep.
         transitionTo(State::SLEEPING);
@@ -181,6 +215,7 @@ const char* stateToString(State state) {
         case State::DETECTING: return "detecting";
         case State::INTERACTING: return "interacting";
         case State::SLEEPING: return "sleeping";
+        case State::NAVIGATING: return "navigating";
         case State::UPDATE: return "update";
         case State::ERROR: return "error";
         default: return "unknown";
@@ -221,6 +256,13 @@ void sendTelemetry() {
     VibrationData vib = sensors.getVibration();
     doc["vibration"]["detected"] = vib.detected;
     doc["vibration"]["count"] = vib.count;
+
+    // Navigation status (present only while the owl is NAVIGATING). Lets the
+    // RPi confirm the head is actually being held at the requested angle.
+    if (currentState == State::NAVIGATING) {
+        doc["navigation"]["active"] = true;
+        doc["navigation"]["angle"] = navTargetAngle;
+    }
 
     // Update mode (SoftAP + OTA)
     if (currentState == State::UPDATE) {
@@ -347,6 +389,9 @@ void exitUpdateMode() {
 //   INTERACTING --(face lost for 5s)--> IDLE
 //   SLEEPING --(wake command)--> IDLE
 //   any --(sleep command)--> SLEEPING
+//   any --(nav active=true)--> NAVIGATING
+//   NAVIGATING --(nav active=false)--> IDLE
+//   NAVIGATING --(no nav update for NAV_TIMEOUT_MS)--> IDLE  (self-timeout)
 //   any --(4 rapid taps)--> UPDATE
 //   UPDATE --(1 tap)--> IDLE
 void updateState() {
@@ -430,6 +475,23 @@ void updateState() {
         case State::SLEEPING: {
             applyExpression(EyeExpression::SLEEPING);
             servos.setCenter();
+            break;
+        }
+
+        case State::NAVIGATING: {
+            // "Guide me home": the head is pinned to the RPi-computed compass
+            // bearing (navTargetAngle) and ignores face-following. The RPi
+            // re-sends the angle on each refresh, so the head tracks the
+            // destination. If the RPi stops sending (link dropped / it crashed),
+            // the self-timeout recenters the head and returns to idle so it is
+            // never left stuck pointing somewhere.
+            applyExpression(EyeExpression::SEARCHING);
+            servos.setAngle(CH_HEAD, navTargetAngle);
+            if (millis() - navSince > NAV_TIMEOUT_MS) {
+                transitionTo(State::IDLE);
+                servos.setCenter();
+                eyes.setGaze(0, 0);
+            }
             break;
         }
 

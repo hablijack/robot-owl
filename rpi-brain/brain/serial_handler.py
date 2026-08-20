@@ -70,6 +70,17 @@ class UpdateMode:
 
 
 @dataclass
+class NavigationState:
+    """Navigation (compass-to-destination) status from ESP32.
+
+    Present only while the owl is in the NAVIGATING state. `active` is False
+    otherwise; `angle` is the head angle the owl is currently holding.
+    """
+    active: bool = False
+    angle: float = 0.0
+
+
+@dataclass
 class Telemetry:
     """Complete telemetry frame from ESP32"""
     timestamp: float = field(default_factory=time.time)
@@ -83,6 +94,7 @@ class Telemetry:
     servos: list = field(default_factory=lambda: [0.0] * 5)
     face: FaceDetection = field(default_factory=FaceDetection)
     eye_expression: str = "neutral"
+    navigation: NavigationState = field(default_factory=NavigationState)
 
 
 class SerialHandler:
@@ -153,6 +165,20 @@ class SerialHandler:
             "y": y
         })
 
+    def nav(self, angle: float, active: bool = True) -> bool:
+        """Tell the ESP32 to point its head at `angle` (navigation/compass).
+
+        active=True  -> enter/hold the NAVIGATING state and point the head at
+                        `angle` (a PERSISTENT override: it holds until an
+                        active=False is sent, unlike the 3s gaze override).
+        active=False -> leave NAVIGATING (head recenters, back to normal).
+        """
+        return self.send_command({
+            "type": "nav",
+            "angle": angle,
+            "active": active,
+        })
+
     def wake(self) -> bool:
         """Wake up ESP32 from sleep"""
         return self.send_command({"type": "wake"})
@@ -210,6 +236,12 @@ class SerialHandler:
 
             # Parse servos
             telemetry.servos = data.get("servos", [0.0] * 5)
+
+            # Parse navigation status (present only while the owl is NAVIGATING).
+            nav_data = data.get("navigation")
+            if nav_data:
+                telemetry.navigation.active = bool(nav_data.get("active", False))
+                telemetry.navigation.angle = nav_data.get("angle", 0.0)
 
             # Parse face detection
             face_data = data.get("face", {})

@@ -6,4 +6,18 @@ flask>=3.0.0
 # Audio (MAX98357A I2S amp): playback via ALSA 'aplay'; WAV built with stdlib
 # (wave + struct). No extra Python package required — 'aplay' ships with the
 # Raspberry Pi OS (alsa-utils).
+# Speech recognition (USB mic -> offline Whisper ASR). Imported lazily by
+# brain/speech.py ONLY when speech.enabled is true, so the brain still runs on
+# a machine with no mic and the heavy ASR import stays out of normal startup.
+# 'sounddevice' needs the PortAudio system library (installed by setup.sh).
+#
+# The ASR engine is faster-whisper (NOT openai-whisper): it wraps the same
+# Whisper models via CTranslate2 instead of torch, so it installs far lighter
+# (no torch, no nvidia/cuda) and runs several times faster on the RPi's ARM
+# CPU. ctranslate2 is its runtime and is pinned for the RPi aarch64 wheels.
+# The model is downloaded from Hugging Face on first run (see setup.sh).
+sounddevice>=0.4.6
+soundfile>=0.12.1
+faster-whisper>=1.0.0
+ctranslate2>=4.5.0
 

@@ -17,6 +17,25 @@ expressions:
   sleeping: "sleeping"
   neutral: "neutral"
 
+# Autonomous sleep (Phase 4): the owl falls asleep BY ITSELF when the
+# environment goes quiet, and wakes on a real interaction. There is deliberately
+# NO command / spoken word that forces it to sleep.
+#
+#   enabled  - run the inactivity policy (disabled by default: existing
+#              deployments keep the current "never auto-sleeps" behavior)
+#   after_s  - how long with NO interaction trigger before the owl is put to
+#              sleep. An "interaction trigger" (resets the timer) is any of:
+#                * a face detected (ESP32 camera)
+#                * a vibration / tap (SW420)
+#                * the RPi hearing the user (speech) -- see speech.wake_keywords
+#              Note the firmware ALREADY self-wakes the owl on a face or a
+#              vibration; this policy only adds the "fall asleep on inactivity"
+#              half and the "wake on speech" half (see speech.wake_keywords).
+supervisor:
+  auto_sleep:
+    enabled: false
+    after_s: 60
+
 # Optional web UI for manually testing features (blink, expressions, head).
 # It forwards the same NDJSON commands the supervisor uses and shows live
 # telemetry. LAN-only by default; there is NO authentication, so do not expose
@@ -26,6 +45,37 @@ web:
   host: 0.0.0.0
   port: 8080
 
+# Navigation ("guide me home"): the owl becomes a compass that points at a
+# named destination. You teach it places (name + lat/lon) in the web UI's
+# "Places" card, then say "Bring mich nach <name>" (or press Start in the web
+# UI) and its head continuously turns to point at the destination.
+# pattern: see NAVIGATION_PLAN.md.
+#
+#   enabled          - run the navigation controller (disabled by default so
+#                      existing deployments are unaffected)
+#   locations_file   - where named places are persisted; "" = default
+#                      (~/.config/robot-owl/locations.json)
+#   head_min/max     - the head servo's range; the aim is clamped to this so a
+#                      destination behind the owl pins the head to its limit
+#   refresh_min_s    - min seconds between head-angle updates sent to the ESP32
+#   arrive_m         - "you've arrived" distance from the destination
+#   timeout_s        - stop navigating if no telemetry for this long (a dropped
+#                      link must not leave the head stuck pointing)
+#   aim_sign         - +1 or -1. The ONE thing to confirm on hardware: if the
+#                      head points the WRONG way, flip this (see plan §10/#1).
+#   sound_start/stop - owl-calls cued on entering / leaving navigation
+navigation:
+  enabled: false
+  locations_file: ""
+  head_min: -45
+  head_max: 45
+  refresh_min_s: 0.5
+  arrive_m: 15.0
+  timeout_s: 120
+  aim_sign: 1
+  sound_start: detecting
+  sound_stop: waking
+
 # Audio via MAX98357A I2S amp on the Pi (see WIRING.md). The RPi generates
 # short sound effects in-process and plays them over I2S. If the amp is not
 # wired / I2S not enabled, the brain still runs and just logs that audio is
@@ -34,3 +84,63 @@ audio:
   enabled: true
   device: ""          # e.g. "bcm2835-I2S-hw-0" (leave "" for default)
   volume: 0.8        # 0.0 - 1.0 master gain applied to generated samples
+
+# Speech recognition: the owl hears the user and reacts (expression + owl-call).
+# ASR runs on the RPi (a USB mic) and drives the owl via the EXISTING temporary
+# expression/gaze overrides + local amp audio, so the ESP32 firmware is unchanged.
+# Disabled by default: flip 'enabled: true' once a USB mic is plugged in.
+#
+#   mic_device  - ALSA capture device (from `arecord -l` / `aplay -l`); "" = default
+#   model       - whisper model size: tiny / base / small (tiny = fastest)
+#   window_s    - length of the audio clip transcribed when the gate opens
+#   chunk_s     - VAD window: how much audio accumulates before an energy check
+#   sample_rate - mic sample rate (Whisper expects 16 kHz; the capture resamples)
+#   channels    - mic input channels (1 = mono)
+#   vad_threshold - per-chunk RMS energy gate; a chunk below this is silence
+#   energy_floor_ms - sustained silence (this long) closes the gate / discards
+#                     a half-built utterance
+#   cooldown_s  - min seconds between two reactions (the spec's COOLDOWN_TIME)
+#   require_face - only react while a face is in frame (prevents reacting to TV)
+#   clusters    - keyword lists (German) mapped to reaction clusters
+#   reactions   - cluster -> {expression override, sound played on the amp}
+#   wake_keywords - Phase 4: while the owl is ASLEEP it ignores ordinary speech
+#                   (so it isn't startled by the TV). Only a clearly ADDRESSED
+#                   word/phrase here wakes it (the RPi sends the existing "wake"
+#                   command, then runs the normal reaction). Keep this short and
+#                   unambiguous: the owl's name and an explicit "wake" phrase.
+#                   Empty list = speech never wakes it (only face/vibration do,
+#                   which the firmware already handles on its own).
+speech:
+  enabled: false
+  language: de
+  model: tiny
+  mic_device: ""
+  window_s: 2.5
+  chunk_s: 0.3
+  sample_rate: 16000
+  channels: 1
+  vad_threshold: 0.02
+  energy_floor_ms: 700
+  cooldown_s: 4.5
+  require_face: true
+  wake_keywords: ["eule", "wacht auf"]
+  # Navigation: phrases that START guiding toward a place. The words AFTER the
+  # trigger are treated as the place name and matched (fuzzy) against the saved
+  # locations, e.g. "bring mich nach hotel" -> name "hotel". In feed() these
+  # triggers are checked BEFORE the keyword clusters, so a nav sentence is not
+  # stolen by a single question word ("wie komm ich zu ..."). See
+  # NAVIGATION_PLAN.md §5.5 / §13.
+  nav_triggers: ["bring mich nach", "bringe mich nach", "zeig mir den weg nach",
+                 "wie komme ich nach", "wie komme ich zum", "wie komme ich zu"]
+  # Phrases that STOP navigation (see plan §13). Kept specific to navigation so
+  # an ordinary "nein" (the negative cluster) doesn't cancel a route.
+  nav_stop_keywords: ["stopp die navigation", "stopp navigieren", "lass die
+                      navigation", "reicht", "danke"]
+  clusters:
+    happy:    ["fein", "brav", "toll", "super", "gute eule", "mag dich", "schön"]
+    negative: ["nein", "lass das", "aufhören", "böse", "ach", "huch"]
+    question: ["wer", "wie", "was", "warum"]
+  reactions:
+    happy:    { expression: happy,     sound: happy }
+    negative: { expression: surprised, sound: alert }
+    question: { expression: surprised, sound: alert }
